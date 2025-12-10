@@ -6,10 +6,12 @@ require("dotenv").config();
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-const uri = `mongodb+srv://${process.env.MONGO_USER}:${process.env.MONGO_PASS}@cluster0.3lozw5z.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+// MongoDB connection
+const uri = process.env.uri; // e.g., mongodb+srv://user:pass@cluster.mongodb.net/ticket_booking_platform
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -25,11 +27,13 @@ async function run() {
 
     const db = client.db("ticket_booking_platform");
     const usersCollection = db.collection("users");
-    const ticketCollection = db.collection("tickets");
-    const bookingsCollection = db.collection("bookings"); // for user bookings
-    const transactionsCollection = db.collection("transactions"); // for payments
+    const ticketsCollection = db.collection("tickets");
+    const bookingsCollection = db.collection("bookings");
+    const transactionsCollection = db.collection("transactions");
 
-    /*** Users ***/
+    /* ---------------------- USERS ---------------------- */
+
+    // Add new user
     app.post("/users", async (req, res) => {
       try {
         const { name, email, password, role } = req.body;
@@ -42,92 +46,108 @@ async function run() {
           createdAt: new Date(),
         };
         const result = await usersCollection.insertOne(newUser);
-        res.status(201).json({ message: "User created successfully", user: newUser, insertedId: result.insertedId });
+        res.status(201).json({ message: "User created", user: newUser, insertedId: result.insertedId });
       } catch (err) {
         console.error(err);
-        res.status(500).json({ message: "Server error", error: err.message });
+        res.status(500).json({ error: err.message });
       }
     });
 
+    // Get all users
     app.get("/users", async (req, res) => {
       const users = await usersCollection.find({}).toArray();
       res.json(users);
     });
 
+    // Update user
     app.patch("/users/:id", async (req, res) => {
       const id = req.params.id;
+      if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
       const updateData = req.body;
       const result = await usersCollection.updateOne({ _id: new ObjectId(id) }, { $set: updateData });
       res.json({ message: "User updated", result });
     });
 
-    /*** Tickets ***/
+    /* ---------------------- TICKETS ---------------------- */
+
+    // Add ticket
     app.post("/tickets", async (req, res) => {
       try {
-        const { title, from, to, transportType, price, quantity, dateTime, perks, image, vendorName, vendorEmail } = req.body;
-        const newTicket = {
-          title,
-          from,
-          to,
-          transportType,
-          price: Number(price),
-          quantity: Number(quantity),
-          departureDateTime: new Date(dateTime),
-          perks: perks || [],
-          image: image || "",
-          vendorName: vendorName || "",
-          vendorEmail: vendorEmail || "",
+        console.log("Ticket Received:", req.body);
+
+        const departureDateTime = new Date(`${req.body.departureDate}T${req.body.departureTime}`);
+
+        const ticketData = {
+          ...req.body,
+          price: Number(req.body.price),
+          quantity: Number(req.body.quantity),
+          departureDateTime,
+          createdAt: new Date(),
           verificationStatus: "pending",
           advertise: false,
-          createdAt: new Date(),
         };
-        const result = await ticketCollection.insertOne(newTicket);
-        res.status(201).json({ message: "Ticket added", ticket: newTicket, ticketId: result.insertedId });
+
+        const result = await ticketsCollection.insertOne(ticketData);
+        console.log("Inserted Ticket:", ticketData);
+
+        res.status(201).json({ message: "Ticket added", ticket: ticketData, ticketId: result.insertedId });
       } catch (err) {
         console.error(err);
-        res.status(500).json({ message: "Server error", error: err.message });
+        res.status(500).json({ error: err.message });
       }
     });
 
+    // Get all approved tickets
     app.get("/tickets", async (req, res) => {
-      const tickets = await ticketCollection.find({ verificationStatus: "approved" }).toArray();
+      const query = { verificationStatus: "approved" };
+      if (req.query.advertised === "true") query.advertise = true;
+      const tickets = await ticketsCollection.find(query).toArray();
       res.json(tickets);
     });
 
-    app.get("/tickets/vendor/:email", async (req, res) => {
-      const email = req.params.email;
-      const tickets = await ticketCollection.find({ vendorEmail: email }).toArray();
-      res.json(tickets);
-    });
-
+    // Get ticket by id
     app.get("/tickets/:id", async (req, res) => {
       const id = req.params.id;
-      const ticket = await ticketCollection.findOne({ _id: new ObjectId(id) });
+      if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid Ticket ID" });
+      const ticket = await ticketsCollection.findOne({ _id: new ObjectId(id) });
       res.json(ticket);
     });
 
+    // Get tickets by vendor
+    app.get("/tickets/vendor/:email", async (req, res) => {
+      const email = req.params.email;
+      const tickets = await ticketsCollection.find({ vendorEmail: email }).toArray();
+      res.json(tickets);
+    });
+
+    // Update ticket
     app.patch("/tickets/:id", async (req, res) => {
       const id = req.params.id;
+      if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid Ticket ID" });
       const updateData = req.body;
-      const result = await ticketCollection.updateOne({ _id: new ObjectId(id) }, { $set: updateData });
+      const result = await ticketsCollection.updateOne({ _id: new ObjectId(id) }, { $set: updateData });
       res.json({ message: "Ticket updated", result });
     });
 
+    // Delete ticket
     app.delete("/tickets/:id", async (req, res) => {
       const id = req.params.id;
-      const result = await ticketCollection.deleteOne({ _id: new ObjectId(id) });
+      if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid Ticket ID" });
+      const result = await ticketsCollection.deleteOne({ _id: new ObjectId(id) });
       res.json({ message: "Ticket deleted", result });
     });
 
-    /*** Bookings ***/
+    /* ---------------------- BOOKINGS ---------------------- */
+
     app.post("/bookings", async (req, res) => {
-      const booking = {
-        ...req.body,
-        status: "pending",
-        createdAt: new Date(),
-      };
-      const result = await bookingsCollection.insertOne(booking);
-      res.status(201).json({ message: "Booking created", booking, bookingId: result.insertedId });
+      try {
+        const booking = { ...req.body, status: "pending", createdAt: new Date() };
+        const result = await bookingsCollection.insertOne(booking);
+        res.status(201).json({ message: "Booking created", booking, bookingId: result.insertedId });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+      }
     });
 
     app.get("/bookings/user/:email", async (req, res) => {
@@ -144,19 +164,23 @@ async function run() {
 
     app.patch("/bookings/:id", async (req, res) => {
       const id = req.params.id;
+      if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid Booking ID" });
       const updateData = req.body;
       const result = await bookingsCollection.updateOne({ _id: new ObjectId(id) }, { $set: updateData });
       res.json({ message: "Booking updated", result });
     });
 
-    /*** Transactions ***/
+    /* ---------------------- TRANSACTIONS ---------------------- */
+
     app.post("/transactions", async (req, res) => {
-      const transaction = {
-        ...req.body,
-        createdAt: new Date(),
-      };
-      const result = await transactionsCollection.insertOne(transaction);
-      res.status(201).json({ message: "Transaction saved", transaction, transactionId: result.insertedId });
+      try {
+        const transaction = { ...req.body, createdAt: new Date() };
+        const result = await transactionsCollection.insertOne(transaction);
+        res.status(201).json({ message: "Transaction saved", transaction, transactionId: result.insertedId });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+      }
     });
 
     app.get("/transactions/user/:email", async (req, res) => {
@@ -165,7 +189,10 @@ async function run() {
       res.json(transactions);
     });
 
-    app.listen(port, () => console.log(`Server running on port ${port}`));
+    /* ---------------------- SERVER START ---------------------- */
+
+    app.listen(port, () => console.log(`Booking Server running on port ${port}`));
+
   } catch (err) {
     console.error("MongoDB Connection Error:", err);
   }
