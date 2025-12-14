@@ -164,6 +164,11 @@ app.get("/tickets", async (req, res) => {
   const tickets = await ticketsCollection.find(query).toArray();
   res.json(tickets);
 });
+app.get("/allTickets", async (req, res) => {
+
+  const tickets = await ticketsCollection.find().toArray();
+  res.json(tickets);
+});
 
 // Get ticket by ID
 app.get("/tickets/:id", async (req, res) => {
@@ -240,6 +245,39 @@ app.patch("/bookings/:id", verifyJWT, async (req, res) => {
 
   const result = await bookingsCollection.updateOne({ _id: new ObjectId(id) }, { $set: req.body });
   res.json({ message: "Booking updated", result });
+});
+
+// advertise 
+app.patch("/tickets/:id/advertise", async (req, res) => {
+  try {
+    const ticketId = req.params.id;
+    const { advertise } = req.body; // true or false
+
+    // Check if admin already has 6 advertised tickets
+    if (advertise) {
+      const advertisedCount = await ticketsCollection.countDocuments({ isAdvertised: true });
+      if (advertisedCount >= 6) {
+        return res.status(400).json({ message: "Cannot advertise more than 6 tickets" });
+      }
+    }
+
+    // Update ticket
+    const result = await ticketsCollection.updateOne(
+      { _id: new ObjectId(ticketId) },
+      { $set: { isAdvertised: advertise } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: "Ticket not found" });
+    }
+
+    res.json({
+      message: `Ticket ${advertise ? "advertised" : "unadvertised"} successfully`,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
 /* ---------------------- START SERVER ---------------------- */
