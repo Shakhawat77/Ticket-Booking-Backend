@@ -16,11 +16,7 @@ app.use(express.json());
 /* ---------------- DATABASE ---------------- */
 const uri = process.env.uri;
 const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: false,
-    deprecationErrors: false,
-  },
+  serverApi: { version: ServerApiVersion.v1, strict: false, deprecationErrors: false },
 });
 
 let usersCollection;
@@ -36,7 +32,7 @@ async function connectDB() {
   console.log("🟢 MongoDB Connected");
 }
 
-/* ---------------- JWT VERIFICATION ---------------- */
+/* ---------------- AUTH HELPERS ---------------- */
 function verifyJWT(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ message: "Unauthorized" });
@@ -44,17 +40,21 @@ function verifyJWT(req, res, next) {
   const token = authHeader.split(" ")[1];
   jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
     if (err) return res.status(403).json({ message: "Forbidden" });
-    req.user = decoded; // { email, role }
+    req.user = decoded;
     next();
   });
 }
 
-/* ---------------- ROOT ---------------- */
-app.get("/", (req, res) => {
-  res.send("Ticket Booking Server Running");
-});
+const verifyAdmin = (req, res, next) =>
+  req.user.role === "ADMIN" ? next() : res.status(403).json({ message: "Admin only" });
 
-/* ---------------- AUTH / JWT ---------------- */
+const verifyVendor = (req, res, next) =>
+  req.user.role === "VENDOR" ? next() : res.status(403).json({ message: "Vendor only" });
+
+/* ---------------- ROOT ---------------- */
+app.get("/", (req, res) => res.send("Ticket Booking Server Running"));
+
+/* ---------------- JWT ---------------- */
 app.get("/jwt", async (req, res) => {
   const email = req.query.email;
   if (!email) return res.status(400).json({ message: "Email required" });
@@ -62,160 +62,151 @@ app.get("/jwt", async (req, res) => {
   const user = await usersCollection.findOne({ email });
   if (!user) return res.status(404).json({ message: "User not found" });
 
-  const token = jwt.sign(
-    { email: user.email, role: user.role },
-    process.env.JWT_SECRET,
-    { expiresIn: "1d" }
-  );
+  const token = jwt.sign({ email: user.email, role: user.role }, process.env.JWT_SECRET, {
+    expiresIn: "1d",
+  });
 
   res.json({ token });
 });
 
 /* ---------------- USERS ---------------- */
-
-// Add new user
 app.post("/users", async (req, res) => {
-  const { name, email, role } = req.body;
-
+  const { name, email } = req.body;
   const exists = await usersCollection.findOne({ email });
   if (exists) return res.json(exists);
 
-  const user = {
-    name,
-    email,
-    role: role?.toUpperCase() || "USER",
-    isFraud: false,
-    createdAt: new Date(),
-  };
-
+  const user = { name, email, role: "USER", isFraud: false, createdAt: new Date() };
   await usersCollection.insertOne(user);
   res.json(user);
 });
 
-// Get all users (admin purpose)
-app.get("/users", verifyJWT, async (req, res) => {
-  try {
-    const users = await usersCollection.find({}).toArray();
-    res.json(users);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to fetch users" });
-  }
+app.get("/users", verifyJWT, verifyAdmin, async (req, res) => {
+  const users = await usersCollection.find({}).toArray();
+  res.json(users);
 });
 
-// Get user by email
 app.get("/users/email/:email", verifyJWT, async (req, res) => {
-  try {
-    const email = req.params.email;
-    const user = await usersCollection.findOne({ email });
-    if (!user) return res.status(404).json({ message: "User not found" });
-
-    res.json({ role: user.role });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to fetch user" });
-  }
+  const user = await usersCollection.findOne({ email: req.params.email });
+  if (!user) return res.status(404).json({ message: "User not found" });
+  res.json({ role: user.role });
 });
+
+app.patch("/users/role/:id", verifyJWT, verifyAdmin, async (req, res) => {
+  const { role } = req.body;
+  if (!["ADMIN", "VENDOR", "USER"].includes(role)) return res.status(400).json({ message: "Invalid role" });
+
+  await usersCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { role } });
+  res.json({ message: "Role updated" });
+});
+
+app.patch("/users/fraud/:id", verifyJWT, verifyAdmin, async (req, res) => {
+  const user = await usersCollection.findOne({ _id: new ObjectId(req.params.id) });
+  if (!user || user.role !== "VENDOR") return res.status(400).json({ message: "Invalid vendor" });
+
+  await usersCollection.updateOne({ _id: user._id }, { $set: { isFraud: true } });
+  await ticketsCollection.updateMany({ vendorEmail: user.email }, { $set: { isHidden: true } });
+
+  res.json({ message: "Vendor marked as fraud" });
+});
+
 /* ---------------- TICKETS ---------------- */
-
-// Public – approved tickets
+// Public tickets
 app.get("/tickets", async (req, res) => {
-  try {
-    const query = { verificationStatus: "approved" };
-    if (req.query.advertised === "true") query.isAdvertised = true;
+  const query = { verificationStatus: "approved", isHidden: { $ne: true } };
+  if (req.query.advertised === "true") query.isAdvertised = true;
 
-    const tickets = await ticketsCollection.find(query).toArray();
-    res.json(tickets);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to fetch tickets" });
-  }
+  const tickets = await ticketsCollection.find(query).toArray();
+  res.json(tickets);
 });
 
-// Vendor – all tickets of logged-in vendor
-app.get("/vendor/tickets", verifyJWT, async (req, res) => {
-  if (req.user.role !== "VENDOR")
-    return res.status(403).json({ message: "Forbidden" });
+// Admin fetch all approved tickets (for AdvertiseTickets page)
+app.get("/tickets/admin/approved", verifyJWT, verifyAdmin, async (req, res) => {
+  const tickets = await ticketsCollection.find({ verificationStatus: "approved" }).toArray();
+  res.json(tickets);
+});
 
-  try {
-    const tickets = await ticketsCollection
-      .find({ vendorEmail: req.user.email })
-      .toArray();
-    res.json(tickets);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to fetch vendor tickets" });
+// Vendor create ticket
+app.post("/tickets", verifyJWT, verifyVendor, async (req, res) => {
+  const vendor = await usersCollection.findOne({ email: req.user.email });
+  if (vendor.isFraud) return res.status(403).json({ message: "Fraud vendor blocked" });
+
+  const ticket = {
+    ...req.body,
+    vendorEmail: req.user.email,
+    verificationStatus: "pending",
+    isAdvertised: false,
+    isHidden: false,
+    createdAt: new Date(),
+  };
+
+  await ticketsCollection.insertOne(ticket);
+  res.json(ticket);
+});
+
+// Vendor routes
+app.get("/vendor/tickets", verifyJWT, verifyVendor, async (req, res) => {
+  const tickets = await ticketsCollection.find({ vendorEmail: req.user.email }).toArray();
+  res.json(tickets);
+});
+
+app.patch("/tickets/vendor/:id", verifyJWT, verifyVendor, async (req, res) => {
+  const ticket = await ticketsCollection.findOne({ _id: new ObjectId(req.params.id) });
+  if (!ticket || ticket.vendorEmail !== req.user.email) return res.status(403).json({ message: "Forbidden" });
+
+  await ticketsCollection.updateOne({ _id: ticket._id }, { $set: req.body });
+  res.json({ message: "Ticket updated" });
+});
+
+app.delete("/tickets/vendor/:id", verifyJWT, verifyVendor, async (req, res) => {
+  const ticket = await ticketsCollection.findOne({ _id: new ObjectId(req.params.id) });
+  if (!ticket || ticket.vendorEmail !== req.user.email) return res.status(403).json({ message: "Forbidden" });
+
+  await ticketsCollection.deleteOne({ _id: ticket._id });
+  res.json({ message: "Ticket deleted" });
+});
+
+// Admin manage tickets
+app.get("/admin/tickets", verifyJWT, verifyAdmin, async (req, res) => {
+  const tickets = await ticketsCollection.find({}).toArray();
+  res.json(tickets);
+});
+
+app.patch("/admin/tickets/:id", verifyJWT, verifyAdmin, async (req, res) => {
+  const { verificationStatus } = req.body;
+  if (!["approved", "rejected"].includes(verificationStatus)) return res.status(400).json({ message: "Invalid status" });
+
+  await ticketsCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { verificationStatus } });
+  res.json({ message: "Ticket status updated" });
+});
+
+// Advertise / Unadvertise route
+app.patch("/tickets/advertise/:id", verifyJWT, verifyAdmin, async (req, res) => {
+  const { isAdvertised } = req.body;
+  if (typeof isAdvertised !== "boolean") return res.status(400).json({ message: "Invalid value" });
+
+  if (isAdvertised) {
+    const count = await ticketsCollection.countDocuments({ isAdvertised: true });
+    if (count >= 6) return res.status(400).json({ message: "Maximum 6 advertised tickets allowed" });
   }
+
+  await ticketsCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { isAdvertised } });
+  res.json({ message: "Advertisement status updated" });
 });
 
 /* ---------------- BOOKINGS ---------------- */
-
-// Vendor – requested bookings for their tickets
-app.get("/bookings/vendor", verifyJWT, async (req, res) => {
-  if (req.user.role !== "VENDOR")
-    return res.status(403).json({ message: "Forbidden" });
-
-  try {
-    const bookings = await bookingsCollection
-      .find({ vendorEmail: req.user.email })
-      .toArray();
-    res.json(bookings);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to fetch bookings" });
-  }
+app.get("/bookings/vendor", verifyJWT, verifyVendor, async (req, res) => {
+  const bookings = await bookingsCollection.find({ vendorEmail: req.user.email }).toArray();
+  res.json(bookings);
 });
 
-// Accept booking
-app.patch("/bookings/accepted/:id", verifyJWT, async (req, res) => {
-  if (req.user.role !== "VENDOR")
-    return res.status(403).json({ message: "Forbidden" });
-
-  const { id } = req.params;
-  if (!ObjectId.isValid(id)) return res.status(400).json({ message: "Invalid Booking ID" });
-
-  try {
-    const booking = await bookingsCollection.findOne({ _id: new ObjectId(id) });
-    if (!booking) return res.status(404).json({ message: "Booking not found" });
-    if (booking.vendorEmail !== req.user.email)
-      return res.status(403).json({ message: "Forbidden" });
-
-    await bookingsCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: { status: "accepted" } }
-    );
-
-    res.json({ message: "Booking accepted" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to accept booking" });
-  }
+app.patch("/bookings/accepted/:id", verifyJWT, verifyVendor, async (req, res) => {
+  await bookingsCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { status: "accepted" } });
+  res.json({ message: "Booking accepted" });
 });
 
-// Reject booking
-app.patch("/bookings/rejected/:id", verifyJWT, async (req, res) => {
-  if (req.user.role !== "VENDOR")
-    return res.status(403).json({ message: "Forbidden" });
-
-  const { id } = req.params;
-  if (!ObjectId.isValid(id)) return res.status(400).json({ message: "Invalid Booking ID" });
-
-  try {
-    const booking = await bookingsCollection.findOne({ _id: new ObjectId(id) });
-    if (!booking) return res.status(404).json({ message: "Booking not found" });
-    if (booking.vendorEmail !== req.user.email)
-      return res.status(403).json({ message: "Forbidden" });
-
-    await bookingsCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: { status: "rejected" } }
-    );
-
-    res.json({ message: "Booking rejected" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to reject booking" });
-  }
+app.patch("/bookings/rejected/:id", verifyJWT, verifyVendor, async (req, res) => {
+  await bookingsCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { status: "rejected" } });
+  res.json({ message: "Booking rejected" });
 });
 
 /* ---------------- START SERVER ---------------- */
