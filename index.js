@@ -1,5 +1,3 @@
-/* ---------------- BACKEND: server.js ---------------- */
-
 import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
@@ -7,14 +5,11 @@ import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 
 dotenv.config();
-
 const app = express();
 
-/* ---------------- MIDDLEWARE ---------------- */
 app.use(cors());
 app.use(express.json());
 
-/* ---------------- DATABASE ---------------- */
 const uri = process.env.uri;
 const PORT = process.env.PORT || 5000;
 const client = new MongoClient(uri, {
@@ -28,7 +23,6 @@ const client = new MongoClient(uri, {
 let usersCollection;
 let ticketsCollection;
 let bookingsCollection;
-
 let isConnected = false;
 
 async function connectDB() {
@@ -43,13 +37,11 @@ async function connectDB() {
   }
 }
 
-// Lazy connect middleware
 app.use(async (req, res, next) => {
   await connectDB();
   next();
 });
 
-/* ---------------- AUTH HELPERS ---------------- */
 function verifyJWT(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ message: "Unauthorized" });
@@ -72,12 +64,10 @@ const verifyVendor = (req, res, next) =>
     ? next()
     : res.status(403).json({ message: "Vendor only" });
 
-/* ---------------- ROOT ---------------- */
 app.get("/", (req, res) => {
   res.send("Ticket Booking Server Running");
 });
 
-/* ---------------- JWT ---------------- */
 app.get("/jwt", async (req, res) => {
   const email = req.query.email;
   if (!email) return res.status(400).json({ message: "Email required" });
@@ -94,7 +84,7 @@ app.get("/jwt", async (req, res) => {
   res.json({ token });
 });
 
-/* ---------------- USERS ---------------- */
+// user
 app.post("/users", async (req, res) => {
   const { name, email } = req.body;
   const exists = await usersCollection.findOne({ email });
@@ -157,11 +147,10 @@ app.patch("/users/fraud/:id", verifyJWT, verifyAdmin, async (req, res) => {
   res.json({ message: "Vendor marked as fraud" });
 });
 
-/* ---------------- TRANSACTIONS ---------------- */
 app.get("/transactions/user", verifyJWT, async (req, res) => {
   try {
     const userEmail = req.user.email;
-    const transactions = await bookingsCollection // fixed
+    const transactions = await bookingsCollection 
       .find({ userEmail })
       .sort({ createdAt: -1 })
       .toArray();
@@ -173,7 +162,7 @@ app.get("/transactions/user", verifyJWT, async (req, res) => {
   }
 });
 
-/* ---------------- VENDOR ADD TICKET ---------------- */
+// add ticket
 app.post("/tickets", verifyJWT, verifyVendor, async (req, res) => {
   const {
     title,
@@ -210,7 +199,7 @@ app.post("/tickets", verifyJWT, verifyVendor, async (req, res) => {
   res.status(201).json({ message: "Ticket added", ticket: result });
 });
 
-/* ---------------- TICKETS ---------------- */
+
 app.get("/tickets", async (req, res) => {
   const query = {
     verificationStatus: "approved",
@@ -243,7 +232,7 @@ app.get("/vendor/tickets", verifyJWT, verifyVendor, async (req, res) => {
   res.json(tickets);
 });
 
-/* ---------------- BOOKINGS ---------------- */
+// Booked
 app.post("/bookings", verifyJWT, async (req, res) => {
   const { ticketId, quantity, totalPrice } = req.body;
 
@@ -358,7 +347,7 @@ app.patch("/bookings/pay/:id", verifyJWT, async (req, res) => {
   res.json({ message: "Payment successful" });
 });
 
-/* ---------------- ADMIN TICKETS ---------------- */
+// Admin
 app.get("/admin/tickets", verifyJWT, verifyAdmin, async (req, res) => {
   try {
     const tickets = await ticketsCollection.find({}).toArray();
@@ -419,9 +408,9 @@ app.patch("/admin/tickets/advertise/:id", verifyJWT, verifyAdmin, async (req, re
   app.listen(PORT, async () => {
   try {
     await connectDB();
-    console.log(`🟢 Server running at http://localhost:${PORT}`);
+    console.log(` Server running at http://localhost:${PORT}`);
   } catch (err) {
-    console.error("❌ Failed to connect MongoDB:", err);
+    console.error(" Failed to connect MongoDB:", err);
   }
 });
 
